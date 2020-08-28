@@ -2,7 +2,6 @@
 Usage Instructions:
     10-shot sinusoid:
         python main.py --datasource=sinusoid --logdir=logs/sine/ --metatrain_iterations=70000 --norm=None --update_batch_size=10
-
     10-shot sinusoid baselines:
         python main.py --datasource=sinusoid --logdir=logs/sine/ --pretrain_iterations=70000 --metatrain_iterations=0 --norm=None --update_batch_size=10 --baseline=oracle
         python main.py --datasource=sinusoid --logdir=logs/sine/ --pretrain_iterations=70000 --metatrain_iterations=0 --norm=None --update_batch_size=10
@@ -31,13 +30,14 @@ import pickle
 import random
 import tensorflow as tf
 
-from data_generator import DataGenerator
-from maml import MAML
+from .data_generator import DataGenerator
+from .maml import MAML
 from tensorflow.python.platform import flags
 
 FLAGS = flags.FLAGS
 
 ## Dataset/method options
+flags.DEFINE_string('task', 'train', 'preprocess or train or plot')
 flags.DEFINE_string('datasource', 'sinusoid', 'sinusoid or omniglot or miniimagenet')
 flags.DEFINE_integer('num_classes', 5, 'number of classes used in classification (e.g. 5-way classification).')
 # oracle means task id is input (only suitable for sinusoid)
@@ -68,7 +68,11 @@ flags.DEFINE_integer('test_iter', -1, 'iteration to load model (-1 for latest mo
 flags.DEFINE_bool('test_set', False, 'Set to true to test on the the test set, False for the validation set.')
 flags.DEFINE_integer('train_update_batch_size', -1, 'number of examples used for gradient update during training (use if you want to test with a different number).')
 flags.DEFINE_float('train_update_lr', -1, 'value of inner gradient step step during training. (use if you want to test with a different value)') # 0.1 for omniglot
+flags.DEFINE_string('data_path', '/mnt/research-share/projects/zhuzhuan/maml-data', 'Data path for training/testing/evaluation.') # 0.1 for omniglot
 
+config = {
+    'data_path': flags.data_path
+}
 def train(model, saver, sess, exp_string, data_generator, resume_itr=0):
     SUMMARY_INTERVAL = 100
     SAVE_INTERVAL = 1000
@@ -215,6 +219,9 @@ def test(model, saver, sess, exp_string, data_generator, test_num_updates=None):
         writer.writerow(ci95)
 
 def main():
+    if FLAGS.task == 'preprocess':
+        print("Dummy ")
+        exit()
     if FLAGS.datasource == 'sinusoid':
         if FLAGS.train:
             test_num_updates = 5
@@ -235,20 +242,20 @@ def main():
         FLAGS.meta_batch_size = 1
 
     if FLAGS.datasource == 'sinusoid':
-        data_generator = DataGenerator(FLAGS.update_batch_size*2, FLAGS.meta_batch_size)
+        data_generator = DataGenerator(FLAGS.update_batch_size*2, FLAGS.meta_batch_size, config=config)
     else:
         if FLAGS.metatrain_iterations == 0 and FLAGS.datasource == 'miniimagenet':
             assert FLAGS.meta_batch_size == 1
             assert FLAGS.update_batch_size == 1
-            data_generator = DataGenerator(1, FLAGS.meta_batch_size)  # only use one datapoint,
+            data_generator = DataGenerator(1, FLAGS.meta_batch_size, config=config)  # only use one datapoint,
         else:
             if FLAGS.datasource == 'miniimagenet': # TODO - use 15 val examples for imagenet?
                 if FLAGS.train:
-                    data_generator = DataGenerator(FLAGS.update_batch_size+15, FLAGS.meta_batch_size)  # only use one datapoint for testing to save memory
+                    data_generator = DataGenerator(FLAGS.update_batch_size+15, FLAGS.meta_batch_size, config=config)  # only use one datapoint for testing to save memory
                 else:
-                    data_generator = DataGenerator(FLAGS.update_batch_size*2, FLAGS.meta_batch_size)  # only use one datapoint for testing to save memory
+                    data_generator = DataGenerator(FLAGS.update_batch_size*2, FLAGS.meta_batch_size, config=config)  # only use one datapoint for testing to save memory
             else:
-                data_generator = DataGenerator(FLAGS.update_batch_size*2, FLAGS.meta_batch_size)  # only use one datapoint for testing to save memory
+                data_generator = DataGenerator(FLAGS.update_batch_size*2, FLAGS.meta_batch_size, config=config)  # only use one datapoint for testing to save memory
 
 
     dim_output = data_generator.dim_output

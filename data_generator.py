@@ -5,7 +5,8 @@ import random
 import tensorflow as tf
 
 from tensorflow.python.platform import flags
-from utils import get_images
+from maml.utils import get_images
+import multiprocessing
 
 FLAGS = flags.FLAGS
 
@@ -17,19 +18,20 @@ class DataGenerator(object):
     def __init__(self, num_samples_per_class, batch_size, config={}):
         """
         Args:
-            num_samples_per_class: num samples to generate per class in one batch
-            batch_size: size of meta batch size (e.g. number of functions)
+            num_samples_per_class: num samples to generate per class in one batch # used for inner-updates -- Judy
+            batch_size: size of meta batch size (e.g. number of functions) # T
         """
-        self.batch_size = batch_size
         self.num_samples_per_class = num_samples_per_class
+        self.batch_size = batch_size
         self.num_classes = 1  # by default 1 (only relevant for classification problems)
+        self.data_path = config.get('data_path', './data')
 
         if FLAGS.datasource == 'sinusoid':
             self.generate = self.generate_sinusoid_batch
             self.amp_range = config.get('amp_range', [0.1, 5.0])
             self.phase_range = config.get('phase_range', [0, np.pi])
             self.input_range = config.get('input_range', [-5.0, 5.0])
-            self.dim_input = 1
+            self.dim_input = 2 if 'multi' in FLAGS.data else 1
             self.dim_output = 1
         elif 'omniglot' in FLAGS.datasource:
             self.num_classes = config.get('num_classes', FLAGS.num_classes)
@@ -37,7 +39,7 @@ class DataGenerator(object):
             self.dim_input = np.prod(self.img_size)
             self.dim_output = self.num_classes
             # data that is pre-resized using PIL with lanczos filter
-            data_folder = config.get('data_folder', './data/omniglot_resized')
+            data_folder = os.path.join(self.path, 'omniglot_resized')
 
             character_folders = [os.path.join(data_folder, family, character) \
                 for family in os.listdir(data_folder) \
@@ -58,11 +60,13 @@ class DataGenerator(object):
             self.img_size = config.get('img_size', (84, 84))
             self.dim_input = np.prod(self.img_size)*3
             self.dim_output = self.num_classes
-            metatrain_folder = config.get('metatrain_folder', './data/miniImagenet/train')
+            metatrain_folder = os.path.join(self.data_path, 'miniImagenet/train')
+            assert os.path.exists(metatrain_folder)
+
             if FLAGS.test_set:
-                metaval_folder = config.get('metaval_folder', './data/miniImagenet/test')
+                metaval_folder = os.path.join(self.data_path, 'miniImagenet/test')
             else:
-                metaval_folder = config.get('metaval_folder', './data/miniImagenet/val')
+                metaval_folder = os.path.join(self.data_path, 'miniImagenet/val')
 
             metatrain_folders = [os.path.join(metatrain_folder, label) \
                 for label in os.listdir(metatrain_folder) \
@@ -78,28 +82,59 @@ class DataGenerator(object):
         else:
             raise ValueError('Unrecognized data source')
 
-
-    def make_data_tensor(self, train=True):
+    def get_cached_filenames(self, train=True):
+        # for mnist dataset, generating list of file names used for training /evaluating.
+        # Only generate when the cached file does not exist. -- Judy
+        # TBD: cache for omniglot dataset
         if train:
             folders = self.metatrain_character_folders
             # number of tasks, not number of meta-iterations. (divide by metabatch size to measure)
             num_total_batches = 200000
+            task = 'train'
         else:
             folders = self.metaval_character_folders
             num_total_batches = 600
+            task = 'test' if FLAGS.test_set else 'eval'
 
-        # make list of files
-        print('Generating filenames')
-        all_filenames = []
-        for _ in range(num_total_batches):
-            sampled_character_folders = random.sample(folders, self.num_classes)
-            random.shuffle(sampled_character_folders)
-            labels_and_images = get_images(sampled_character_folders, range(self.num_classes), nb_samples=self.num_samples_per_class, shuffle=False)
-            # make sure the above isn't randomized order
-            labels = [li[0] for li in labels_and_images]
-            filenames = [li[1] for li in labels_and_images]
-            all_filenames.extend(filenames)
+        name_string = 'data_' + FLAGS.datasource + '.task_' + task
+        name_string += '.cls_'+str(self.num_classes) + '.tb_'+ str(num_total_batches)
+        name_string += '.spc_'+str(self.num_samples_per_class)
+        cmd = "mkdir -p {}".format(os.path.join(self.data_path, FLAGS.datasource))
+        os.system(cmd)
+        file_path  = os.path.join(self.data_path, FLAGS.datasource, '{}.npy'.format(name_string))
+        if not os.path.exists(file_path):
+            print("Generating file names ...")
+            # check if file name exists
+            all_filenames = []
+            #for i in range(10):
+            for i in range(num_total_batches):
+                sampled_character_folders = random.sample(folders, self.num_classes)
+                random.shuffle(sampled_character_folders)
+                labels_and_images = get_images(sampled_character_folders, range(self.num_classes), nb_samples=self.num_samples_per_class, shuffle=False)
+                # make sure the above isn't randomized order, aka shuffle must be False -- Judy
+                labels = [li[0] for li in labels_and_images]
+                filenames = [li[1] for li in labels_and_images]
+                all_filenames.extend(filenames)
+                if i % 500 == 0:
+                    print("Processing {}-th batch".format(i))
 
+            with open(file_path, 'wb') as f:
+                np.save(f, np.array(all_filenames))
+                np.save(f, labels)
+                print("Save file lists to {} for later use.".format(file_path))
+        else:
+            print("Loading previous generated file names from {}.".format(file_path))
+            with open(file_path, 'rb') as f:
+                all_filenames=np.load(f)
+                labels=np.load(f)
+
+        return all_filenames, labels
+
+
+    def make_data_tensor(self, train=True):
+        # TBD: get_cached_filenames for omniglot dataset
+        all_filenames, labels = self.get_cached_filenames(train)
+        #exit()
         # make queue for tensorflow to read from
         filename_queue = tf.train.string_input_producer(tf.convert_to_tensor(all_filenames), shuffle=False)
         print('Generating image processing ops')
@@ -129,7 +164,7 @@ class DataGenerator(object):
                 )
         all_image_batches, all_label_batches = [], []
         print('Manipulating image data to be right shape')
-        for i in range(self.batch_size):
+        for i in range(self.batch_size): # number of tasks
             image_batch = images[i*examples_per_batch:(i+1)*examples_per_batch]
 
             if FLAGS.datasource == 'omniglot':
@@ -138,12 +173,12 @@ class DataGenerator(object):
                 rotations = tf.multinomial(tf.log([[1., 1.,1.,1.]]), self.num_classes)
             label_batch = tf.convert_to_tensor(labels)
             new_list, new_label_list = [], []
-            for k in range(self.num_samples_per_class):
+            for k in range(self.num_samples_per_class): # for each sampling, make sure we sample from all num_classes
                 class_idxs = tf.range(0, self.num_classes)
                 class_idxs = tf.random_shuffle(class_idxs)
 
-                true_idxs = class_idxs*self.num_samples_per_class + k
-                new_list.append(tf.gather(image_batch,true_idxs))
+                true_idxs = class_idxs*self.num_samples_per_class + k # from each of the num_classes classes, pick one picture
+                new_list.append(tf.gather(image_batch,true_idxs))     # dim: [num_classes, dim_input]
                 if FLAGS.datasource == 'omniglot': # and FLAGS.train:
                     new_list[-1] = tf.stack([tf.reshape(tf.image.rot90(
                         tf.reshape(new_list[-1][ind], [self.img_size[0],self.img_size[1],1]),
@@ -154,7 +189,7 @@ class DataGenerator(object):
             new_label_list = tf.concat(new_label_list, 0)
             all_image_batches.append(new_list)
             all_label_batches.append(new_label_list)
-        all_image_batches = tf.stack(all_image_batches)
+        all_image_batches = tf.stack(all_image_batches) # has shape [self.batch_size, examples_per_batch, self.dim_input]
         all_label_batches = tf.stack(all_label_batches)
         all_label_batches = tf.one_hot(all_label_batches, self.num_classes)
         return all_image_batches, all_label_batches
@@ -165,10 +200,33 @@ class DataGenerator(object):
         amp = np.random.uniform(self.amp_range[0], self.amp_range[1], [self.batch_size])
         phase = np.random.uniform(self.phase_range[0], self.phase_range[1], [self.batch_size])
         outputs = np.zeros([self.batch_size, self.num_samples_per_class, self.dim_output])
+        if 'multi' in FLAGS.data:
+            # multi-dimension sinusoid data:
+            #   for normal task y =  a sin(x_0 - b) + x1, where x = [x_0, x_1]
+            #   for outlier task y = a sin(x_1 - b) + x0 where x = [x_0, x_1]
+            if 'shuffle' in FLAGS.data:
+                outlier_nums = int( 0.1 * self.batch_size)
+                outlier_idx = np.random.choice(range(self.batch_size), outlier_nums)
+            init_inputs = np.zeros([self.batch_size, self.num_samples_per_class, self.dim_input])
+            for func in range(self.batch_size):
+                init_inputs[func] = np.random.uniform(self.input_range[0], self.input_range[1], [self.num_samples_per_class, self.dim_input])
+                if 'shuffle' in FLAGS.data and func in outlier_idx:
+                    outputs[func]= init_inputs[func, :, :1] + amp[func] * np.sin(init_inputs[func, :, 1:] - phase[func])  # y = x0 + a * sin(x1 - b)
+                else:
+                    outputs[func]= init_inputs[func, :, 1:] + amp[func] * np.sin(init_inputs[func, :, :1] - phase[func])  # y = x1 + a * sin(x0 - b)
+            return init_inputs, outputs, amp, phase # x, y, a, b
+
+        if FLAGS.data == 'mixed':
+            # mixed with large amplitudes
+            #print("Generate data for outlier tasks") # enlarge alpha
+            outlier_nums = int( 0.1 * self.batch_size)
+            outlier_idx = np.random.choice(range(self.batch_size), outlier_nums)
+            amp[outlier_idx] = amp[outlier_idx] * 100
         init_inputs = np.zeros([self.batch_size, self.num_samples_per_class, self.dim_input])
         for func in range(self.batch_size):
             init_inputs[func] = np.random.uniform(self.input_range[0], self.input_range[1], [self.num_samples_per_class, 1])
-            if input_idx is not None:
+            if input_idx is not None: # for certain samples per class, not sure its usage. -- Judy
                 init_inputs[:,input_idx:,0] = np.linspace(self.input_range[0], self.input_range[1], num=self.num_samples_per_class-input_idx, retstep=False)
-            outputs[func] = amp[func] * np.sin(init_inputs[func]-phase[func])
-        return init_inputs, outputs, amp, phase
+            outputs[func] = amp[func] * np.sin(init_inputs[func]-phase[func]) # y = a * sin(x - b)
+        return init_inputs, outputs, amp, phase # x, y, a, b
+
